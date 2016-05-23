@@ -751,9 +751,11 @@ filterNotChar c = B.filterNotByte (c2w c)
 -- equivalent to a pair of 'unpack' operations, and so space
 -- usage may be large for multi-megabyte ByteStrings
 zip :: ByteString -> ByteString -> [(Char,Char)]
-zip ps qs
-    | B.null ps || B.null qs = []
-    | otherwise = (unsafeHead ps, unsafeHead qs) : zip (B.unsafeTail ps) (B.unsafeTail qs)
+zip ps qs =
+    case (uncons ps, uncons qs) of
+      (Nothing, _) -> []
+      (_, Nothing) -> []
+      (Just (p, ps'), Just (q, qs')) -> (p, q) : zip ps' qs'
 
 -- | 'zipWith' generalises 'zip' by zipping with the function given as
 -- the first argument, instead of a tupling function.  For example,
@@ -767,14 +769,6 @@ zipWith f = B.zipWith ((. w2c) . f . w2c)
 unzip :: [(Char,Char)] -> (ByteString,ByteString)
 unzip ls = (pack (P.map fst ls), pack (P.map snd ls))
 {-# INLINE unzip #-}
-
--- | A variety of 'head' for non-empty ByteStrings. 'unsafeHead' omits
--- the check for the empty case, which is good for performance, but
--- there is an obligation on the programmer to provide a proof that the
--- ByteString is non-empty.
-unsafeHead :: ByteString -> Char
-unsafeHead  = w2c . B.unsafeHead
-{-# INLINE unsafeHead #-}
 
 -- ---------------------------------------------------------------------
 -- Things that depend on the encoding
@@ -897,25 +891,20 @@ unwords = intercalate (singleton ' ')
 -- integer at the beginning of the string, it returns Nothing, otherwise
 -- it just returns the int read, and the rest of the string.
 readInt :: ByteString -> Maybe (Int, ByteString)
-readInt as
-    | null as   = Nothing
-    | otherwise =
-        case unsafeHead as of
-            '-' -> loop True  0 0 (B.unsafeTail as)
-            '+' -> loop False 0 0 (B.unsafeTail as)
-            _   -> loop False 0 0 as
-
+readInt as =
+    do (c, as') <- uncons as
+       case c of
+         '-' -> loop True  0 0 as'
+         '+' -> loop False 0 0 as'
+         _   -> loop False 0 0 as
     where loop :: Bool -> Int -> Int -> ByteString -> Maybe (Int, ByteString)
-          loop neg !i !n !ps
-              | null ps   = end neg i n ps
-              | otherwise =
-                  case B.unsafeHead ps of
-                    w | w >= 0x30
-                     && w <= 0x39 -> loop neg (i+1)
-                                          (n * 10 + (fromIntegral w - 0x30))
-                                          (B.unsafeTail ps)
-                      | otherwise -> end neg i n ps
-
+          loop neg !i !n !ps =
+              case B.uncons ps of
+                Nothing -> end neg i n ps
+                Just (w, ps') ->
+                  if w >= 0x30 && w <= 0x39
+                     then loop neg (i+1) (n * 10 + fromIntegral w - 0x30) ps'
+                     else end neg i n ps
           end _    0 _ _  = Nothing
           end True _ n ps = Just (negate n, ps)
           end _    _ n ps = Just (n, ps)
@@ -924,36 +913,33 @@ readInt as
 -- there is no integer at the beginning of the string, it returns Nothing,
 -- otherwise it just returns the int read, and the rest of the string.
 readInteger :: ByteString -> Maybe (Integer, ByteString)
-readInteger as
-    | null as   = Nothing
-    | otherwise =
-        case unsafeHead as of
-            '-' -> first (B.unsafeTail as) >>= \(n, bs) -> return (-n, bs)
-            '+' -> first (B.unsafeTail as)
-            _   -> first as
-
-    where first ps | null ps   = Nothing
-                   | otherwise =
-                       case B.unsafeHead ps of
-                        w | w >= 0x30 && w <= 0x39 -> Just $
-                            loop 1 (fromIntegral w - 0x30) [] (B.unsafeTail ps)
-                          | otherwise              -> Nothing
+readInteger as =
+    do (c, as') <- uncons as
+       case c of
+         '-' -> first as' >>= \(n, bs) -> return (-n, bs)
+         '+' -> first as'
+         _   -> first as
+    where first ps =
+              do (c, ps') <- B.uncons ps
+                 case c of
+                   w | w >= 0x30 && w <= 0x39 -> Just $
+                       loop 1 (fromIntegral w - 0x30) [] ps'
+                     | otherwise              -> Nothing
 
           loop :: Int -> Int -> [Integer]
                -> ByteString -> (Integer, ByteString)
-          loop !d !acc ns !ps
-              | null ps   = combine d acc ns empty
-              | otherwise =
-                  case B.unsafeHead ps of
-                   w | w >= 0x30 && w <= 0x39 ->
-                       if d == 9 then loop 1 (fromIntegral w - 0x30)
-                                           (toInteger acc : ns)
-                                           (B.unsafeTail ps)
-                                 else loop (d+1)
-                                           (10*acc + (fromIntegral w - 0x30))
-                                           ns (B.unsafeTail ps)
-                     | otherwise -> combine d acc ns ps
-
+          loop !d !acc ns !ps =
+              case B.uncons ps of
+                Nothing -> combine d acc ns empty
+                Just (w, ps') ->
+                  if w >= 0x30 && w <= 0x39
+                     then if d == 9 then loop 1 (fromIntegral w - 0x30)
+                                                (toInteger acc : ns)
+                                                ps'
+                                    else loop (d+1)
+                                              (10*acc + fromIntegral w - 0x30)
+                                              ns ps'
+                     else combine d acc ns ps
           combine _ acc [] ps = (toInteger acc, ps)
           combine d acc ns ps =
               (10^d * combine1 1000000000 ns + toInteger acc, ps)
